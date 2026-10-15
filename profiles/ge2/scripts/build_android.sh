@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../../.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
 BUILD_DIR="${GE2_BUILD_DIR:-$ROOT_DIR/out/ge2-android-arm64}"
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
