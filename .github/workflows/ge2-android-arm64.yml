@@ -37,6 +37,12 @@ jobs:
         with:
           packages: "ndk;27.2.12479018"
 
+      - name: Validate profile helper scripts
+        run: |
+          sh -n profiles/ge2/scripts/analyze_local.sh
+          sh -n profiles/ge2/scripts/build_android.sh
+          python3 -m py_compile profiles/ge2/scripts/audit_report.py
+
       - name: Configure
         run: |
           cmake -S . -B out/ge2-android-arm64 -G Ninja \
