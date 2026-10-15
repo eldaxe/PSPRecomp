@@ -1563,42 +1563,25 @@ int generate_auto(const std::filesystem::path &elf_path,
             &import_stubs,
         };
 
-        std::ostringstream out;
-        out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
-        // The register-cache lowering passes (per-basic-block GPR/FPR caches and
-        // the cross-unit hot-register cache) are deliberately absent.  They kept
-        // large numbers of guest registers live in C++ locals and in a second
-        // long-lived object alongside AllegrexContext; inside the ~10,000-line
-        // single functions emitted here, that drove MSVC's optimizer past the
-        // point where it converges.  Affected units never finished compiling and
-        // each grew past 2 GB, exhausting system memory during a normal build.
-        // This pipeline matches the last configuration observed booting on
-        // hardware.
-        // Keep automatic generation memory-bounded. The text-lowering passes above
-        // each materialize another full copy of a translation unit (and several use
-        // regex_replace); on large PSP PRXs their transient allocations can dwarf the
-        // emitted source and trigger the OS OOM killer before the first unit is saved.
-        // These passes are optional codegen optimizations: emit_function_source already
-        // produces valid code using the generic context/memory helpers, so preserve
-        // semantics and leave the optional lowerings out of the automatic path.
-        std::cerr << "Emitting unit " << unit.bucket << " (" << unit.instructions.size()
-                  << " instructions, " << unit.entries.size() << " entries)\n";
-        // Avoid materializing a second complete copy of a large generated unit.
-        // The lowering is an optional source optimization; on large PSP ELFs it can
-        // push the generator over the memory limit after CFG analysis has completed.
-        out << emit_function_source(generated_unit, memory, generated_unit.name);
-        out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
-        out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
-            << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes
-            << "u, &" << generated_unit.name << ", &"
-            << generated_unit_cpp_entry_name(unit.bucket) << ");\n";
+        // Keep one owned output buffer for this translation unit. The old
+        // ostringstream -> str() path retained the stream buffer and then copied
+        // the entire generated source again, which can double peak RSS for GE2.
+        std::string unit_source;
+        unit_source.reserve(unit.instructions.size() * 180u + unit.entries.size() * 96u + 512u);
+        unit_source += "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+        unit_source += emit_function_source(generated_unit, memory, generated_unit.name);
+        unit_source += "void register_generated_unit_" + std::to_string(unit.bucket) + "(Runtime &runtime) {\n";
+        unit_source += "    runtime.register_generated_unit(" + std::to_string(unit.bucket) + "u, " +
+            psprecomp::hex32(generated_unit.address) + "u, " + std::to_string(unit_span_bytes) +
+            "u, &" + generated_unit.name + ", &" +
+            generated_unit_cpp_entry_name(unit.bucket) + ");\n";
         for (const auto label : unit.entries) {
-            out << "    runtime.register_function(" << psprecomp::hex32(label) << "u, &"
-                << generated_unit.name << ", \"" << generated_unit.name << "\");\n";
+            unit_source += "    runtime.register_function(" + psprecomp::hex32(label) + "u, &" +
+                generated_unit.name + ", \"" + generated_unit.name + "\");\n";
             ++registered_entries;
         }
-        out << "}\n} // namespace psprecomp\n";
-        rewritten_units += write_text_if_changed(path, out.str()) ? 1u : 0u;
+        unit_source += "}\n} // namespace psprecomp\n";
+        rewritten_units += write_text_if_changed(path, unit_source) ? 1u : 0u;
     }
 
     const auto registry_path = output_dir / "generated_registry.cpp";
