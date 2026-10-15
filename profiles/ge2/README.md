@@ -50,11 +50,20 @@ cmake -S . -B out/framework -DPSPRECOMP_PROFILE=""
 cmake --build out/framework --target psp_analyze psp_recomp
 ```
 
-Then analyze a local decrypted ELF:
+Then analyze a local ELF/PRX with the helper script (it builds the host tools first):
 
 ```bash
-out/framework/psp_analyze profiles/ge2/game/EBOOT_DECRYPTED.ELF profiles/ge2/analysis/ge2_report.json
+# Default input: profiles/ge2/game/EBOOT.BIN
+profiles/ge2/scripts/analyze_local.sh
+
+# Or specify the local executable explicitly
+profiles/ge2/scripts/analyze_local.sh /path/to/EBOOT_DECRYPTED.ELF
+
+# Optional: also generate the automatic AOT corpus under ignored analysis/
+profiles/ge2/scripts/analyze_local.sh --codegen /path/to/EBOOT_DECRYPTED.ELF
 ```
+
+The helper keeps reports and generated scratch code in the ignored `profiles/ge2/analysis/` directory. If the executable needs a non-default relocation base, set `GE2_LOAD_BASE=0x...` only after confirming the correct base for that exact PRX.
 
 Review the report's entry point, segment layout, relocation statistics,
 function boundaries, unsupported instructions, and imports before attempting
