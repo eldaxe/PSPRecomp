@@ -850,7 +850,7 @@ std::string direct_unit_chain_expression(
         std::to_string(unit) + "u>(ctx, &aot_mem)";
 }
 
-void emit_target(std::ostringstream &body, std::uint32_t target,
+void emit_target(std::ostream &body, std::uint32_t target,
                  const std::set<std::uint32_t> &labels, const char *indent,
                  std::uint32_t executable_base = 0u,
                  std::uint32_t unit_span_bytes = 0u,
@@ -1187,7 +1187,7 @@ int generate_manual(const std::filesystem::path &elf_path,
             const auto decoded = psprecomp::decode_allegrex(memory.load32(pc));
             pc += decoded.has_delay_slot() ? 8u : 4u;
         }
-        out << emit_function_source(input, memory, safe_name(input.name, input.address));
+        emit_function_source(out, input, memory, safe_name(input.name, input.address));
         generated.push_back(std::move(input));
     }
 
