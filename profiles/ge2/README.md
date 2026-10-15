@@ -63,7 +63,16 @@ profiles/ge2/scripts/analyze_local.sh /path/to/EBOOT_DECRYPTED.ELF
 profiles/ge2/scripts/analyze_local.sh --codegen /path/to/EBOOT_DECRYPTED.ELF
 ```
 
-The helper keeps reports and generated scratch code in the ignored `profiles/ge2/analysis/` directory. If the executable needs a non-default relocation base, set `GE2_LOAD_BASE=0x...` only after confirming the correct base for that exact PRX.
+The helper keeps reports and generated scratch code in the ignored `profiles/ge2/analysis/` directory. The default load base is `0x08804000`, matching PSPRecomp core defaults; override it with `GE2_LOAD_BASE=0x...` only after confirming the correct base for that exact PRX.
+
+Audit the analyzer output and generate an unresolved-NID backlog with:
+
+```bash
+python3 profiles/ge2/scripts/audit_report.py profiles/ge2/analysis/ge2_report.json \\
+  --output profiles/ge2/analysis/unresolved_imports.csv
+```
+
+The audit reads the adjacent `ge2_report_imports.csv` emitted by `psp_analyze`. Use the report hash to ensure the analysis corresponds to the exact executable build before accepting generated AOT output.
 
 Review the report's entry point, segment layout, relocation statistics,
 function boundaries, unsupported instructions, and imports before attempting
