@@ -1226,57 +1226,80 @@ int generate_manual(const std::filesystem::path &elf_path,
 // readable helper form used by their source-level tests.
 std::string lower_constant_gpr_writes(std::string text) {
     constexpr std::string_view needle = "ctx.set_gpr(";
-    std::size_t search = 0u;
-    while ((search = text.find(needle, search)) != std::string::npos) {
-        const std::size_t open = search + needle.size() - 1u;
-        std::size_t cursor = open + 1u;
-        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor]))) ++cursor;
-        const std::size_t index_begin = cursor;
-        while (cursor < text.size() && std::isdigit(static_cast<unsigned char>(text[cursor]))) ++cursor;
-        if (cursor == index_begin) { search += needle.size(); continue; }
-        const std::uint32_t index = static_cast<std::uint32_t>(
-            std::strtoul(text.substr(index_begin, cursor - index_begin).c_str(), nullptr, 10));
-        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor]))) ++cursor;
-        if (cursor >= text.size() || text[cursor] != ',') { search += needle.size(); continue; }
-        const std::size_t expression_begin = cursor + 1u;
+    std::string lowered;
+    lowered.reserve(text.size());
+    std::size_t cursor = 0u;
 
-        int paren_depth = 1;
-        bool in_string = false;
-        bool in_char = false;
-        bool escaped = false;
-        std::size_t close = std::string::npos;
-        for (cursor = expression_begin; cursor < text.size(); ++cursor) {
-            const char ch = text[cursor];
-            if (escaped) { escaped = false; continue; }
-            if ((in_string || in_char) && ch == '\\') { escaped = true; continue; }
-            if (!in_char && ch == '"') { in_string = !in_string; continue; }
-            if (!in_string && ch == '\'') { in_char = !in_char; continue; }
-            if (in_string || in_char) continue;
-            if (ch == '(') ++paren_depth;
-            else if (ch == ')' && --paren_depth == 0) { close = cursor; break; }
+    // Build a new buffer in one forward pass. Repeated std::string::replace()
+    // shifts the remainder for every GPR write and becomes quadratic on large
+    // generated units, causing multi-gigabyte transient allocations.
+    while (cursor < text.size()) {
+        const std::size_t search = text.find(needle, cursor);
+        if (search == std::string::npos) {
+            lowered.append(text, cursor, std::string::npos);
+            break;
         }
-        if (close == std::string::npos) { search += needle.size(); continue; }
 
-        std::size_t first = expression_begin;
-        std::size_t last = close;
-        while (first < last && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
-        while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1u]))) --last;
-        const std::string expression = text.substr(first, last - first);
-        std::string replacement;
-        if (index == 0u) {
-            replacement = "(void)(" + expression + ")";
-        } else if (index < 32u) {
-            replacement = "ctx.gpr[" + std::to_string(index) + "] = (" + expression + ")";
-        } else {
-            // Defensive fallback.  Automatic Allegrex decoding should never emit
-            // an out-of-range architectural GPR, but preserve validation if it does.
-            search = close + 1u;
+        std::size_t parse = search + needle.size();
+        while (parse < text.size() && std::isspace(static_cast<unsigned char>(text[parse]))) ++parse;
+        const std::size_t index_begin = parse;
+        while (parse < text.size() && std::isdigit(static_cast<unsigned char>(text[parse]))) ++parse;
+        if (parse == index_begin) {
+            lowered.append(text, cursor, search + needle.size() - cursor);
+            cursor = search + needle.size();
             continue;
         }
-        text.replace(search, close - search + 1u, replacement);
-        search += replacement.size();
+        const auto index = static_cast<std::uint32_t>(
+            std::strtoul(text.c_str() + index_begin, nullptr, 10));
+        while (parse < text.size() && std::isspace(static_cast<unsigned char>(text[parse]))) ++parse;
+        if (parse >= text.size() || text[parse] != ',') {
+            lowered.append(text, cursor, search + needle.size() - cursor);
+            cursor = search + needle.size();
+            continue;
+        }
+
+        const std::size_t expression_begin = parse + 1u;
+        int paren_depth = 1;
+        bool in_string = false, in_char = false, escaped = false;
+        std::size_t close = std::string::npos;
+        for (parse = expression_begin; parse < text.size(); ++parse) {
+            const char ch = text[parse];
+            if (escaped) { escaped = false; continue; }
+            if ((in_string || in_char) && ch == '\\\\') { escaped = true; continue; }
+            if (!in_char && ch == '"') { in_string = !in_string; continue; }
+            if (!in_string && ch == '\\'') { in_char = !in_char; continue; }
+            if (in_string || in_char) continue;
+            if (ch == '(') ++paren_depth;
+            else if (ch == ')' && --paren_depth == 0) { close = parse; break; }
+        }
+        if (close == std::string::npos) {
+            lowered.append(text, cursor, std::string::npos);
+            break;
+        }
+
+        if (index >= 32u) {
+            lowered.append(text, cursor, close + 1u - cursor);
+            cursor = close + 1u;
+            continue;
+        }
+
+        std::size_t first = expression_begin, last = close;
+        while (first < last && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
+        while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1u]))) --last;
+
+        lowered.append(text, cursor, search - cursor);
+        if (index == 0u) {
+            lowered += "(void)(";
+        } else {
+            lowered += "ctx.gpr[";
+            lowered += std::to_string(index);
+            lowered += "] = (";
+        }
+        lowered.append(text, first, last - first);
+        lowered += ')';
+        cursor = close + 1u;
     }
-    return text;
+    return lowered;
 }
 
 std::string lower_aot_memory_accesses(std::string text) {
