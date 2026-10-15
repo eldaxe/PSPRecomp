@@ -422,21 +422,74 @@ ProgramAnalysis analyze_program(const Elf32Image &elf,
     // across overlapping CFGs and can consume several gigabytes on large PRX files.
     // In low-memory mode, merge each function into the global sets and release its
     // temporary detail sets before analyzing the next seed.
+    if (!retain_function_details) {
+        // AOT needs the union of reachable instruction/entry addresses, not a
+        // separate full CFG for every seed. Walking all seeds through one shared
+        // work queue avoids repeatedly allocating overlapping per-function sets.
+        std::deque<std::uint32_t> pending;
+        std::set<std::uint32_t> queued;
+        for (const auto &[entry, source] : program.seeds) {
+            (void)source;
+            if (queued.insert(entry).second) pending.push_back(entry);
+        }
+
+        while (!pending.empty()) {
+            const std::uint32_t block_start = pending.front();
+            pending.pop_front();
+            if (!is_executable_address(program.executable_ranges, block_start)) continue;
+            program.covered_entry_labels.insert(block_start);
+            if (program.covered_labels.contains(block_start)) continue;
+
+            std::uint32_t pc = block_start;
+            while (is_executable_address(program.executable_ranges, pc)) {
+                if (pc != block_start && program.seeds.contains(pc)) break;
+                if (program.covered_labels.contains(pc)) break;
+                program.covered_labels.insert(pc);
+                const auto decoded = decode_allegrex(memory.load32(pc));
+
+                auto enqueue = [&](std::uint32_t target) {
+                    if (is_executable_address(program.executable_ranges, target) &&
+                        queued.insert(target).second) pending.push_back(target);
+                };
+
+                if (is_conditional_branch(decoded.kind)) {
+                    enqueue(branch_target(pc, decoded));
+                    enqueue(pc + 8u);
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::J) {
+                    enqueue(direct_jump_target(pc, decoded));
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::Jal) {
+                    enqueue(direct_jump_target(pc, decoded));
+                    enqueue(pc + 8u);
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::Jalr) {
+                    enqueue(pc + 8u);
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::Jr) break;
+                pc += decoded.has_delay_slot() ? 8u : 4u;
+            }
+        }
+        return program;
+    }
+
     std::unordered_map<std::uint32_t, std::size_t> label_owners;
-    if (retain_function_details) label_owners.reserve(program.seeds.size() * 4u);
+    label_owners.reserve(program.seeds.size() * 4u);
     for (const auto &[entry, source] : program.seeds) {
         (void)source;
         auto function = analyze_function(entry, memory, program.executable_ranges, program.seeds,
                                          max_instructions_per_function);
         for (const auto label : function.labels) program.covered_labels.insert(label);
         for (const auto label : function.entry_labels) {
-            if (retain_function_details) {
-                const auto [it, inserted] = label_owners.emplace(label, program.functions.size());
-                if (!inserted && it->second != program.functions.size()) ++program.overlapping_label_count;
-            }
+            const auto [it, inserted] = label_owners.emplace(label, program.functions.size());
+            if (!inserted && it->second != program.functions.size()) ++program.overlapping_label_count;
             program.covered_entry_labels.insert(label);
         }
-        if (retain_function_details) program.functions.push_back(std::move(function));
+        program.functions.push_back(std::move(function));
     }
     return program;
 }
