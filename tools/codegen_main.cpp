@@ -898,10 +898,10 @@ struct GeneratedFunctionInput {
     const std::set<std::uint32_t> *import_stubs{};
 };
 
-std::string emit_function_source(const GeneratedFunctionInput &function,
-                                 const psprecomp::GuestMemory &memory,
-                                 const std::string &cpp_name) {
-    std::ostringstream body;
+void emit_function_source(std::ostream &body,
+                          const GeneratedFunctionInput &function,
+                          const psprecomp::GuestMemory &memory,
+                          const std::string &cpp_name) {
 
     // Unit entry dispatch.  A `switch (ctx.pc)` over several hundred sparse
     // guest addresses compiles to a branch tree, and every outer dispatch pays
@@ -1142,7 +1142,6 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
     body << "void " << cpp_name << "(Runtime &rt, AllegrexContext &ctx) {\n"
          << "    auto aot_mem = rt.memory().aot_fast_view();\n"
          << "    " << cpp_name << "_entry(rt, ctx, 0u, aot_mem);\n}\n\n";
-    return body.str();
 }
 
 void write_import_wrappers(std::ostream &out, const std::vector<psprecomp::PspImport> &imports) {
@@ -1563,25 +1562,34 @@ int generate_auto(const std::filesystem::path &elf_path,
             &import_stubs,
         };
 
-        // Keep one owned output buffer for this translation unit. The old
-        // ostringstream -> str() path retained the stream buffer and then copied
-        // the entire generated source again, which can double peak RSS for GE2.
-        std::string unit_source;
-        unit_source.reserve(unit.instructions.size() * 180u + unit.entries.size() * 96u + 512u);
-        unit_source += "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
-        unit_source += emit_function_source(generated_unit, memory, generated_unit.name);
-        unit_source += "void register_generated_unit_" + std::to_string(unit.bucket) + "(Runtime &runtime) {\n";
-        unit_source += "    runtime.register_generated_unit(" + std::to_string(unit.bucket) + "u, " +
-            psprecomp::hex32(generated_unit.address) + "u, " + std::to_string(unit_span_bytes) +
-            "u, &" + generated_unit.name + ", &" +
-            generated_unit_cpp_entry_name(unit.bucket) + ");\n";
-        for (const auto label : unit.entries) {
-            unit_source += "    runtime.register_function(" + psprecomp::hex32(label) + "u, &" +
-                generated_unit.name + ", \"" + generated_unit.name + "\");\n";
-            ++registered_entries;
+        // Stream this unit directly to disk. A single 2,800-instruction unit can
+        // generate a very large C++ function; retaining both the complete function
+        // string and a second assembled source buffer caused multi-gigabyte peaks.
+        const auto temporary_path = path.string() + ".tmp";
+        {
+            std::ofstream out(temporary_path, std::ios::binary | std::ios::trunc);
+            if (!out) throw psprecomp::Error("Cannot create generated file: " + path.string());
+            out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+            emit_function_source(out, generated_unit, memory, generated_unit.name);
+            out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
+            out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
+                << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes
+                << "u, &" << generated_unit.name << ", &"
+                << generated_unit_cpp_entry_name(unit.bucket) << ");\n";
+            for (const auto label : unit.entries) {
+                out << "    runtime.register_function(" << psprecomp::hex32(label) << "u, &"
+                    << generated_unit.name << ", \"" << generated_unit.name << "\");\n";
+                ++registered_entries;
+            }
+            out << "}\n} // namespace psprecomp\n";
+            out.flush();
+            if (!out) throw psprecomp::Error("Failed writing generated file: " + path.string());
         }
-        unit_source += "}\n} // namespace psprecomp\n";
-        rewritten_units += write_text_if_changed(path, unit_source) ? 1u : 0u;
+        // Replace an older unit only after the complete temporary source is written.
+        std::error_code remove_error;
+        std::filesystem::remove(path, remove_error);
+        std::filesystem::rename(temporary_path, path);
+        ++rewritten_units;
     }
 
     const auto registry_path = output_dir / "generated_registry.cpp";
