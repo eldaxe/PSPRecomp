@@ -1,0 +1,72 @@
+# God Eater 2 PSPRecomp profile
+
+This profile is the starting point for a native Android ARM64 static-recompilation
+port of God Eater 2 PSP (NPJH-50832). It uses PSPRecomp's reusable Allegrex,
+ELF/PRX, memory, and AOT code-generation framework. It does not embed PPSSPP,
+DyausPita, or PortableKit as a runtime.
+
+## Status
+
+The initial profile scaffold provides Android/ARM64 CMake integration and a
+small JNI diagnostics entry point. It is **not yet a playable port**. No
+commercial executable, ISO/CSO, game assets, decrypted ELF, or generated
+game code is included.
+
+Remaining work includes analyzing a user-provided decrypted ELF, validating
+load addresses and relocations, generating and checking in reproducible AOT
+units, implementing the GE2 bootstrap/HLE, and implementing PSP GE, audio,
+input, threading, timers, and file-system behavior needed by this title.
+
+## Local inputs
+
+Keep the decrypted executable and extracted assets in the ignored local
+directory `profiles/ge2/game/`. Analysis reports belong in
+`profiles/ge2/analysis/`. Neither directory should be committed.
+
+Use only game files you are authorized to use. Decryption and game-data
+extraction are deliberately outside this repository.
+
+## Android ARM64 build
+
+Requirements: Android NDK with CMake/Ninja, CMake 3.20+, and a host C++20
+toolchain for running the analyzer before cross-compiling.
+
+From the repository root:
+
+```bash
+export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/<installed-version>"
+profiles/ge2/scripts/build_android.sh
+```
+
+The build produces `libge2_native.so` in the selected CMake build directory.
+This first stage validates the native Android target and JNI loading surface;
+it does not boot the game until the profile runtime and generated AOT corpus
+are implemented.
+
+For host-side analysis, build the generic tools on the host:
+
+```bash
+cmake -S . -B out/framework -DPSPRECOMP_PROFILE=""
+cmake --build out/framework --target psp_analyze psp_recomp
+```
+
+Then analyze a local decrypted ELF:
+
+```bash
+out/framework/psp_analyze profiles/ge2/game/EBOOT_DECRYPTED.ELF profiles/ge2/analysis/ge2_report.json
+```
+
+Review the report's entry point, segment layout, relocation statistics,
+function boundaries, unsupported instructions, and imports before attempting
+code generation. Do not assume a report alone proves runtime compatibility.
+
+## Architecture contract
+
+- `arm64-v8a` is the initial and only Android ABI.
+- The guest remains 32-bit Allegrex/MIPS; only generated host code is AArch64.
+- Title-specific addresses and HLE belong under this profile, not in
+  `psprecomp_core`.
+- Missing/unknown HLE must be logged and fail explicitly during development;
+  do not silently return success for unimplemented kernel or graphics calls.
+- Keep generator inputs and generated AOT output reproducible and document the
+  exact executable hash expected by the profile.
