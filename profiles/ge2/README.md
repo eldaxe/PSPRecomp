@@ -7,10 +7,12 @@ DyausPita, or PortableKit as a runtime.
 
 ## Status
 
-The initial profile scaffold provides Android/ARM64 CMake integration and a
-small JNI diagnostics entry point. It is **not yet a playable port**. No
-commercial executable, ISO/CSO, game assets, decrypted ELF, or generated
-game code is included.
+The profile now includes an Android ARM64 app shell, a JNI diagnostics entry point,
+and an ISO-9660 import flow that copies a user-selected decrypted EBOOT.BIN into
+the extracted PSP disc tree and records its SHA-256. It is **not yet a playable
+port**: the AOT game corpus and GE2 runtime/HLE/graphics/audio/input integration
+are not implemented. No commercial executable, ISO/CSO, game assets, decrypted
+ELF, or generated game code is included.
 
 Remaining work includes analyzing a user-provided decrypted ELF, validating
 load addresses and relocations, generating and checking in reproducible AOT
@@ -39,9 +41,19 @@ profiles/ge2/scripts/build_android.sh
 ```
 
 The build produces `libge2_native.so` in the selected CMake build directory.
-This first stage validates the native Android target and JNI loading surface;
-it does not boot the game until the profile runtime and generated AOT corpus
-are implemented.
+To build the Android debug APK, use Java 17, Android SDK platform 35, NDK
+27.2.12479018, CMake 3.22.1, and Gradle 8.9:
+
+```bash
+gradle -p profiles/ge2/android --no-daemon assembleDebug
+```
+
+The APK is written to `profiles/ge2/android/app/build/outputs/apk/debug/app-debug.apk`.
+GitHub Actions builds this APK and uploads it as the `ge2-native-android-arm64-debug`
+artifact. The app can import a standard ISO-9660 disc image and a separately
+provided decrypted EBOOT; CSO is not supported by the current importer. Imported
+game files stay in app-private storage. This is only the packaging/import scaffold:
+it does not boot the game until the generated AOT corpus and runtime are implemented.
 
 For host-side analysis, build the generic tools on the host:
 
