@@ -289,7 +289,8 @@ void collect_relocated_data_code_pointers(const Elf32Image &elf,
 std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf,
                                                            const GuestMemory &memory,
                                                            std::uint32_t load_base,
-                                                           const std::vector<ExecutableRange> &ranges) {
+                                                           const std::vector<ExecutableRange> &ranges,
+                                                           bool include_materialized_pointers = true) {
     std::map<std::uint32_t, std::string> seeds;
     const std::uint32_t entry = elf.runtime_entry(load_base);
     add_seed(seeds, ranges, entry, "elf_entry");
@@ -301,7 +302,14 @@ std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf
             add_seed(seeds, ranges, direct_jump_target(pc, decoded), "direct_jal_target");
         }
     }
-    collect_materialized_code_pointers(memory, ranges, seeds);
+    // The materialized-pointer heuristic scans every block start and then
+    // every LUI with a 24-instruction lookahead. On large PRX files this can
+    // generate a very large seed map before CFG traversal even begins.
+    // Low-memory AOT keeps entry/direct-call/relocation-derived seeds and lets
+    // the shared traversal discover reachable blocks without this expensive pass.
+    if (include_materialized_pointers) {
+        collect_materialized_code_pointers(memory, ranges, seeds);
+    }
     collect_relocated_data_code_pointers(elf, memory, load_base, ranges, seeds);
     // R_MIPS_32 relocations are the authoritative source for function pointers
     // stored in read-only tables embedded in the executable segment (init arrays,
@@ -414,7 +422,8 @@ ProgramAnalysis analyze_program(const Elf32Image &elf,
                                 bool retain_function_details) {
     ProgramAnalysis program{};
     program.executable_ranges = executable_ranges_for(elf, load_base);
-    program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges);
+    program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges,
+                                               retain_function_details);
     if (retain_function_details) program.functions.reserve(program.seeds.size());
 
     // The AOT generator only consumes the union of decoded instruction and entry
