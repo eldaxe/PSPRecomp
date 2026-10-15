@@ -1,0 +1,97 @@
+name: PSPRecomp tools CI
+
+on:
+  push:
+    branches:
+      - main
+      - feature/ge2-android-arm64
+    paths:
+      - "CMakeLists.txt"
+      - "include/**"
+      - "src/**"
+      - "tools/**"
+      - "tests/**"
+      - ".github/workflows/psprecomp-tools.yml"
+  pull_request:
+    paths:
+      - "CMakeLists.txt"
+      - "include/**"
+      - "src/**"
+      - "tools/**"
+      - "tests/**"
+      - ".github/workflows/psprecomp-tools.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: psprecomp-tools-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build analyzer and recompiler (Linux x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang
+
+      - name: Configure host tools and tests
+        run: |
+          cmake -S . -B out/host-tools -G Ninja \
+            -DPSPRECOMP_PROFILE="" \
+            -DPSPRECOMP_BUILD_TESTS=ON \
+            -DPSPRECOMP_BUILD_PROFILE_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build analyzer, recompiler, and tests
+        run: |
+          cmake --build out/host-tools \
+            --target psp_analyze psp_recomp psprecomp_tests \
+            --parallel 2
+
+      - name: Run tests
+        run: ctest --test-dir out/host-tools --output-on-failure
+
+      - name: Verify tool usage
+        shell: bash
+        run: |
+          set +e
+          out/host-tools/psp_analyze > out/analyzer-usage.txt 2>&1
+          analyze_status=$?
+          out/host-tools/psp_recomp > out/recomp-usage.txt 2>&1
+          recomp_status=$?
+          set -e
+          grep -q "Usage:" out/analyzer-usage.txt
+          grep -q "Usage:" out/recomp-usage.txt
+          test "$analyze_status" -eq 2
+          test "$recomp_status" -eq 2
+
+      - name: Package host tools
+        run: |
+          mkdir -p out/artifact/psprecomp-tools
+          cp out/host-tools/psp_analyze out/artifact/psprecomp-tools/
+          cp out/host-tools/psp_recomp out/artifact/psprecomp-tools/
+          cp out/analyzer-usage.txt out/artifact/psprecomp-tools/
+          cp out/recomp-usage.txt out/artifact/psprecomp-tools/
+          cp profiles/ge2/scripts/audit_report.py out/artifact/psprecomp-tools/
+          tar -C out/artifact -czf out/psprecomp-tools-linux-x86_64.tar.gz psprecomp-tools
+          sha256sum out/psprecomp-tools-linux-x86_64.tar.gz > out/psprecomp-tools-linux-x86_64.tar.gz.sha256
+
+      - name: Upload analyzer and recompiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: psprecomp-tools-linux-x86_64
+          path: |
+            out/psprecomp-tools-linux-x86_64.tar.gz
+            out/psprecomp-tools-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14
