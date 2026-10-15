@@ -1458,7 +1458,11 @@ bool write_text_if_changed(const std::filesystem::path &path, const std::string 
 int generate_auto(const std::filesystem::path &elf_path,
                   const std::filesystem::path &output_dir,
                   std::uint32_t load_base,
-                  std::uint32_t unit_span_bytes) {
+                  std::uint32_t unit_span_bytes,
+                  std::uint32_t batch_index = 0u,
+                  std::uint32_t batch_count = 1u) {
+    if (batch_count == 0u || batch_index >= batch_count)
+        throw psprecomp::Error("batch index must be in [0, batch_count)");
     const auto elf = psprecomp::Elf32Image::from_file(elf_path);
     psprecomp::GuestMemory memory;
     (void)elf.load_and_relocate(memory, load_base);
@@ -1536,7 +1540,12 @@ int generate_auto(const std::filesystem::path &elf_path,
     std::set<std::filesystem::path> expected_cpp;
     std::size_t rewritten_units = 0u;
     std::size_t registered_entries = 0u;
-    for (const auto &unit : units) {
+    const std::size_t batch_begin = units.size() * batch_index / batch_count;
+    const std::size_t batch_end = units.size() * (batch_index + 1u) / batch_count;
+    std::cout << "AOT batch " << (batch_index + 1u) << "/" << batch_count
+              << ": units [" << batch_begin << ", " << batch_end << ") of " << units.size() << "\n";
+    for (std::size_t unit_index = batch_begin; unit_index < batch_end; ++unit_index) {
+        const auto &unit = units[unit_index];
         std::ostringstream suffix;
         suffix << std::setfill('0') << std::setw(4) << unit.bucket;
         const std::string suffix_text = suffix.str();
@@ -1607,10 +1616,14 @@ int generate_auto(const std::filesystem::path &elf_path,
     registry << "}\n} // namespace psprecomp\n";
     const bool registry_rewritten = write_text_if_changed(registry_path, registry.str());
 
-    for (const auto &entry : std::filesystem::directory_iterator(output_dir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".cpp" ||
-            !entry.path().filename().string().starts_with("generated_")) continue;
-        if (!expected_cpp.contains(entry.path().filename())) std::filesystem::remove(entry.path());
+    // A batch intentionally leaves sources emitted by earlier batches untouched.
+    // Only a full, single-pass generation owns cleanup of stale generated sources.
+    if (batch_count == 1u) {
+        for (const auto &entry : std::filesystem::directory_iterator(output_dir)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".cpp" ||
+                !entry.path().filename().string().starts_with("generated_")) continue;
+            if (!expected_cpp.contains(entry.path().filename())) std::filesystem::remove(entry.path());
+        }
     }
 
     std::ostringstream report;
@@ -1625,7 +1638,11 @@ int generate_auto(const std::filesystem::path &elf_path,
            << "  \"rewritten_translation_units\": " << rewritten_units << ",\n"
            << "  \"registry_rewritten\": " << (registry_rewritten ? "true" : "false") << ",\n"
            << "  \"import_wrappers\": " << imports.size() << ",\n"
-           << "  \"unit_span_bytes\": " << unit_span_bytes << "\n"
+           << "  \"unit_span_bytes\": " << unit_span_bytes << ",\n"
+           << "  \"batch_index\": " << batch_index << ",\n"
+           << "  \"batch_count\": " << batch_count << ",\n"
+           << "  \"batch_begin_unit\": " << batch_begin << ",\n"
+           << "  \"batch_end_unit_exclusive\": " << batch_end << "\n"
            << "}\n";
     write_text_if_changed(output_dir / "auto_codegen_report.json", report.str());
 
@@ -1658,10 +1675,30 @@ int main(int argc, char **argv) {
             if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
             return generate_auto(argv[1], argv[3], load_base, unit_span);
         }
+        if (argc >= 6 && std::string_view(argv[2]) == "--auto-batch") {
+            if (argc > 8) {
+                std::cerr << "Usage: psp_recomp <ELF> --auto-batch <generated_dir> <batch_index> <batch_count> [load_base_hex] [unit_span_bytes]\n"
+                          << "  batch_index is 1-based (1..batch_count)\n";
+                return 2;
+            }
+            const auto batch_index_1based = static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 10));
+            const auto batch_count = static_cast<std::uint32_t>(std::stoul(argv[5], nullptr, 10));
+            if (batch_count == 0u || batch_index_1based == 0u || batch_index_1based > batch_count)
+                throw psprecomp::Error("batch_index must be between 1 and batch_count");
+            const std::uint32_t load_base = argc >= 7
+                ? static_cast<std::uint32_t>(std::stoul(argv[6], nullptr, 0))
+                : psprecomp::kDefaultPspUserLoadBase;
+            const std::uint32_t unit_span = argc >= 8
+                ? static_cast<std::uint32_t>(std::stoul(argv[7], nullptr, 0))
+                : 0x20000u;
+            if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
+            return generate_auto(argv[1], argv[3], load_base, unit_span, batch_index_1based - 1u, batch_count);
+        }
         if (argc == 4) return generate_manual(argv[1], argv[2], argv[3]);
         std::cerr << "Usage:\n"
                   << "  psp_recomp <ELF> <functions.csv> <generated_manifest.cpp>\n"
-                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";
+                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n"
+                  << "  psp_recomp <ELF> --auto-batch <generated_dir> <batch_index> <batch_count> [load_base_hex] [unit_span_bytes]\n";
         return 2;
     } catch (const std::exception &e) {
         std::cerr << "psp_recomp error: " << e.what() << "\n";
