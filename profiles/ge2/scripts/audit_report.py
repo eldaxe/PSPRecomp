@@ -24,6 +24,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("report", type=Path, help="JSON emitted by psp_analyze")
     parser.add_argument("--expected-sha256", help="Optional exact executable SHA-256")
+    parser.add_argument("--imports-csv", type=Path, help="Import CSV emitted beside the report (defaults to <report>_imports.csv)")
     parser.add_argument("--output", type=Path, help="Optional unresolved-import CSV path")
     args = parser.parse_args()
 
@@ -38,7 +39,19 @@ def main():
     is_prx = data.get("is_psp_prx")
     module = data.get("module") or {}
     reloc = data.get("relocations") or {}
-    imports = data.get("imports", [])
+    imports_path = args.imports_csv or args.report.with_name(args.report.stem + "_imports.csv")
+    imports = []
+    if imports_path.is_file():
+        try:
+            with imports_path.open(newline="", encoding="utf-8") as stream:
+                imports = list(csv.DictReader(stream))
+        except OSError as exc:
+            print(f"error: cannot read import CSV: {exc}", file=sys.stderr)
+            return 2
+    else:
+        imports = data.get("imports", [])
+        if not imports:
+            print(f"WARNING: import CSV not found: {imports_path}; report JSON has no per-import rows.")
 
     print("GE2 PSPRecomp report audit")
     print(f"  report:          {args.report}")
