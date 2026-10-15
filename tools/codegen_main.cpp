@@ -1265,9 +1265,9 @@ std::string lower_constant_gpr_writes(std::string text) {
         for (parse = expression_begin; parse < text.size(); ++parse) {
             const char ch = text[parse];
             if (escaped) { escaped = false; continue; }
-            if ((in_string || in_char) && ch == '\\\\') { escaped = true; continue; }
+            if ((in_string || in_char) && ch == '\\') { escaped = true; continue; }
             if (!in_char && ch == '"') { in_string = !in_string; continue; }
-            if (!in_string && ch == '\\'') { in_char = !in_char; continue; }
+            if (!in_string && ch == '\'') { in_char = !in_char; continue; }
             if (in_string || in_char) continue;
             if (ch == '(') ++paren_depth;
             else if (ch == ')' && --paren_depth == 0) { close = parse; break; }
