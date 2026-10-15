@@ -1301,6 +1301,39 @@ std::string lower_constant_gpr_writes(std::string text) {
     return lowered;
 }
 
+class GprLoweringStreamBuf final : public std::streambuf {
+public:
+    explicit GprLoweringStreamBuf(std::ostream &destination) : destination_(destination) {}
+
+protected:
+    int_type overflow(int_type ch) override {
+        if (traits_type::eq_int_type(ch, traits_type::eof()))
+            return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+        const char value = traits_type::to_char_type(ch);
+        line_.push_back(value);
+        if (value == '\\n') flush_line();
+        return ch;
+    }
+
+    int sync() override {
+        if (!line_.empty()) flush_line();
+        destination_.flush();
+        return destination_ ? 0 : -1;
+    }
+
+private:
+    void flush_line() {
+        // Generated instruction expressions are emitted one line at a time.
+        // Lower each line independently to avoid retaining a complete unit-sized
+        // source string and a second lowered copy in memory.
+        destination_ << lower_constant_gpr_writes(std::move(line_));
+        line_.clear();
+    }
+
+    std::ostream &destination_;
+    std::string line_;
+};
+
 std::string lower_aot_memory_accesses(std::string text) {
     // the outer generated-unit wrapper creates one AotFastView and
     // compile-time direct chains pass it by reference across unit boundaries.
@@ -1569,21 +1602,23 @@ int generate_auto(const std::filesystem::path &elf_path,
         {
             std::ofstream out(temporary_path, std::ios::binary | std::ios::trunc);
             if (!out) throw psprecomp::Error("Cannot create generated file: " + path.string());
-            out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
-            emit_function_source(out, generated_unit, memory, generated_unit.name);
-            out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
-            out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
+            GprLoweringStreamBuf lowering_buffer(out);
+            std::ostream lowered_out(&lowering_buffer);
+            lowered_out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+            emit_function_source(lowered_out, generated_unit, memory, generated_unit.name);
+            lowered_out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
+            lowered_out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
                 << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes
                 << "u, &" << generated_unit.name << ", &"
                 << generated_unit_cpp_entry_name(unit.bucket) << ");\n";
             for (const auto label : unit.entries) {
-                out << "    runtime.register_function(" << psprecomp::hex32(label) << "u, &"
+                lowered_out << "    runtime.register_function(" << psprecomp::hex32(label) << "u, &"
                     << generated_unit.name << ", \"" << generated_unit.name << "\");\n";
                 ++registered_entries;
             }
-            out << "}\n} // namespace psprecomp\n";
-            out.flush();
-            if (!out) throw psprecomp::Error("Failed writing generated file: " + path.string());
+            lowered_out << "}\n} // namespace psprecomp\n";
+            lowered_out.flush();
+            if (!lowered_out || !out) throw psprecomp::Error("Failed writing generated file: " + path.string());
         }
         // Replace an older unit only after the complete temporary source is written.
         std::error_code remove_error;
