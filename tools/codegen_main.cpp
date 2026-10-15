@@ -850,7 +850,7 @@ std::string direct_unit_chain_expression(
         std::to_string(unit) + "u>(ctx, &aot_mem)";
 }
 
-void emit_target(std::ostringstream &body, std::uint32_t target,
+void emit_target(std::ostream &body, std::uint32_t target,
                  const std::set<std::uint32_t> &labels, const char *indent,
                  std::uint32_t executable_base = 0u,
                  std::uint32_t unit_span_bytes = 0u,
@@ -898,10 +898,10 @@ struct GeneratedFunctionInput {
     const std::set<std::uint32_t> *import_stubs{};
 };
 
-std::string emit_function_source(const GeneratedFunctionInput &function,
-                                 const psprecomp::GuestMemory &memory,
-                                 const std::string &cpp_name) {
-    std::ostringstream body;
+void emit_function_source(std::ostream &body,
+                          const GeneratedFunctionInput &function,
+                          const psprecomp::GuestMemory &memory,
+                          const std::string &cpp_name) {
 
     // Unit entry dispatch.  A `switch (ctx.pc)` over several hundred sparse
     // guest addresses compiles to a branch tree, and every outer dispatch pays
@@ -1142,7 +1142,6 @@ std::string emit_function_source(const GeneratedFunctionInput &function,
     body << "void " << cpp_name << "(Runtime &rt, AllegrexContext &ctx) {\n"
          << "    auto aot_mem = rt.memory().aot_fast_view();\n"
          << "    " << cpp_name << "_entry(rt, ctx, 0u, aot_mem);\n}\n\n";
-    return body.str();
 }
 
 void write_import_wrappers(std::ostream &out, const std::vector<psprecomp::PspImport> &imports) {
@@ -1188,7 +1187,7 @@ int generate_manual(const std::filesystem::path &elf_path,
             const auto decoded = psprecomp::decode_allegrex(memory.load32(pc));
             pc += decoded.has_delay_slot() ? 8u : 4u;
         }
-        out << emit_function_source(input, memory, safe_name(input.name, input.address));
+        emit_function_source(out, input, memory, safe_name(input.name, input.address));
         generated.push_back(std::move(input));
     }
 
@@ -1226,58 +1225,114 @@ int generate_manual(const std::filesystem::path &elf_path,
 // readable helper form used by their source-level tests.
 std::string lower_constant_gpr_writes(std::string text) {
     constexpr std::string_view needle = "ctx.set_gpr(";
-    std::size_t search = 0u;
-    while ((search = text.find(needle, search)) != std::string::npos) {
-        const std::size_t open = search + needle.size() - 1u;
-        std::size_t cursor = open + 1u;
-        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor]))) ++cursor;
-        const std::size_t index_begin = cursor;
-        while (cursor < text.size() && std::isdigit(static_cast<unsigned char>(text[cursor]))) ++cursor;
-        if (cursor == index_begin) { search += needle.size(); continue; }
-        const std::uint32_t index = static_cast<std::uint32_t>(
-            std::strtoul(text.substr(index_begin, cursor - index_begin).c_str(), nullptr, 10));
-        while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor]))) ++cursor;
-        if (cursor >= text.size() || text[cursor] != ',') { search += needle.size(); continue; }
-        const std::size_t expression_begin = cursor + 1u;
+    std::string lowered;
+    lowered.reserve(text.size());
+    std::size_t cursor = 0u;
 
+    // Build a new buffer in one forward pass. Repeated std::string::replace()
+    // shifts the remainder for every GPR write and becomes quadratic on large
+    // generated units, causing multi-gigabyte transient allocations.
+    while (cursor < text.size()) {
+        const std::size_t search = text.find(needle, cursor);
+        if (search == std::string::npos) {
+            lowered.append(text, cursor, std::string::npos);
+            break;
+        }
+
+        std::size_t parse = search + needle.size();
+        while (parse < text.size() && std::isspace(static_cast<unsigned char>(text[parse]))) ++parse;
+        const std::size_t index_begin = parse;
+        while (parse < text.size() && std::isdigit(static_cast<unsigned char>(text[parse]))) ++parse;
+        if (parse == index_begin) {
+            lowered.append(text, cursor, search + needle.size() - cursor);
+            cursor = search + needle.size();
+            continue;
+        }
+        const auto index = static_cast<std::uint32_t>(
+            std::strtoul(text.c_str() + index_begin, nullptr, 10));
+        while (parse < text.size() && std::isspace(static_cast<unsigned char>(text[parse]))) ++parse;
+        if (parse >= text.size() || text[parse] != ',') {
+            lowered.append(text, cursor, search + needle.size() - cursor);
+            cursor = search + needle.size();
+            continue;
+        }
+
+        const std::size_t expression_begin = parse + 1u;
         int paren_depth = 1;
-        bool in_string = false;
-        bool in_char = false;
-        bool escaped = false;
+        bool in_string = false, in_char = false, escaped = false;
         std::size_t close = std::string::npos;
-        for (cursor = expression_begin; cursor < text.size(); ++cursor) {
-            const char ch = text[cursor];
+        for (parse = expression_begin; parse < text.size(); ++parse) {
+            const char ch = text[parse];
             if (escaped) { escaped = false; continue; }
             if ((in_string || in_char) && ch == '\\') { escaped = true; continue; }
             if (!in_char && ch == '"') { in_string = !in_string; continue; }
             if (!in_string && ch == '\'') { in_char = !in_char; continue; }
             if (in_string || in_char) continue;
             if (ch == '(') ++paren_depth;
-            else if (ch == ')' && --paren_depth == 0) { close = cursor; break; }
+            else if (ch == ')' && --paren_depth == 0) { close = parse; break; }
         }
-        if (close == std::string::npos) { search += needle.size(); continue; }
+        if (close == std::string::npos) {
+            lowered.append(text, cursor, std::string::npos);
+            break;
+        }
 
-        std::size_t first = expression_begin;
-        std::size_t last = close;
-        while (first < last && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
-        while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1u]))) --last;
-        const std::string expression = text.substr(first, last - first);
-        std::string replacement;
-        if (index == 0u) {
-            replacement = "(void)(" + expression + ")";
-        } else if (index < 32u) {
-            replacement = "ctx.gpr[" + std::to_string(index) + "] = (" + expression + ")";
-        } else {
-            // Defensive fallback.  Automatic Allegrex decoding should never emit
-            // an out-of-range architectural GPR, but preserve validation if it does.
-            search = close + 1u;
+        if (index >= 32u) {
+            lowered.append(text, cursor, close + 1u - cursor);
+            cursor = close + 1u;
             continue;
         }
-        text.replace(search, close - search + 1u, replacement);
-        search += replacement.size();
+
+        std::size_t first = expression_begin, last = close;
+        while (first < last && std::isspace(static_cast<unsigned char>(text[first]))) ++first;
+        while (last > first && std::isspace(static_cast<unsigned char>(text[last - 1u]))) --last;
+
+        lowered.append(text, cursor, search - cursor);
+        if (index == 0u) {
+            lowered += "(void)(";
+        } else {
+            lowered += "ctx.gpr[";
+            lowered += std::to_string(index);
+            lowered += "] = (";
+        }
+        lowered.append(text, first, last - first);
+        lowered += ')';
+        cursor = close + 1u;
     }
-    return text;
+    return lowered;
 }
+
+class GprLoweringStreamBuf final : public std::streambuf {
+public:
+    explicit GprLoweringStreamBuf(std::ostream &destination) : destination_(destination) {}
+
+protected:
+    int_type overflow(int_type ch) override {
+        if (traits_type::eq_int_type(ch, traits_type::eof()))
+            return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+        const char value = traits_type::to_char_type(ch);
+        line_.push_back(value);
+        if (value == '\\n') flush_line();
+        return ch;
+    }
+
+    int sync() override {
+        if (!line_.empty()) flush_line();
+        destination_.flush();
+        return destination_ ? 0 : -1;
+    }
+
+private:
+    void flush_line() {
+        // Generated instruction expressions are emitted one line at a time.
+        // Lower each line independently to avoid retaining a complete unit-sized
+        // source string and a second lowered copy in memory.
+        destination_ << lower_constant_gpr_writes(std::move(line_));
+        line_.clear();
+    }
+
+    std::ostream &destination_;
+    std::string line_;
+};
 
 std::string lower_aot_memory_accesses(std::string text) {
     // the outer generated-unit wrapper creates one AotFastView and
@@ -1435,7 +1490,11 @@ bool write_text_if_changed(const std::filesystem::path &path, const std::string 
 int generate_auto(const std::filesystem::path &elf_path,
                   const std::filesystem::path &output_dir,
                   std::uint32_t load_base,
-                  std::uint32_t unit_span_bytes) {
+                  std::uint32_t unit_span_bytes,
+                  std::uint32_t batch_index = 0u,
+                  std::uint32_t batch_count = 1u) {
+    if (batch_count == 0u || batch_index >= batch_count)
+        throw psprecomp::Error("batch index must be in [0, batch_count)");
     const auto elf = psprecomp::Elf32Image::from_file(elf_path);
     psprecomp::GuestMemory memory;
     (void)elf.load_and_relocate(memory, load_base);
@@ -1443,7 +1502,7 @@ int generate_auto(const std::filesystem::path &elf_path,
     if (const auto module = elf.find_module_info(memory, load_base)) imports = elf.scan_imports(memory, *module);
     std::set<std::uint32_t> import_stubs;
     for (const auto &import : imports) import_stubs.insert(import.stub_address);
-    const auto program = psprecomp::analyze_program(elf, memory, load_base);
+    const auto program = psprecomp::analyze_program(elf, memory, load_base, 131072u, false);
     if (program.executable_ranges.empty()) throw psprecomp::Error("ELF has no executable ranges");
 
     std::filesystem::create_directories(output_dir);
@@ -1513,7 +1572,12 @@ int generate_auto(const std::filesystem::path &elf_path,
     std::set<std::filesystem::path> expected_cpp;
     std::size_t rewritten_units = 0u;
     std::size_t registered_entries = 0u;
-    for (const auto &unit : units) {
+    const std::size_t batch_begin = units.size() * batch_index / batch_count;
+    const std::size_t batch_end = units.size() * (batch_index + 1u) / batch_count;
+    std::cout << "AOT batch " << (batch_index + 1u) << "/" << batch_count
+              << ": units [" << batch_begin << ", " << batch_end << ") of " << units.size() << "\n";
+    for (std::size_t unit_index = batch_begin; unit_index < batch_end; ++unit_index) {
+        const auto &unit = units[unit_index];
         std::ostringstream suffix;
         suffix << std::setfill('0') << std::setw(4) << unit.bucket;
         const std::string suffix_text = suffix.str();
@@ -1531,33 +1595,36 @@ int generate_auto(const std::filesystem::path &elf_path,
             &import_stubs,
         };
 
-        std::ostringstream out;
-        out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
-        // The register-cache lowering passes (per-basic-block GPR/FPR caches and
-        // the cross-unit hot-register cache) are deliberately absent.  They kept
-        // large numbers of guest registers live in C++ locals and in a second
-        // long-lived object alongside AllegrexContext; inside the ~10,000-line
-        // single functions emitted here, that drove MSVC's optimizer past the
-        // point where it converges.  Affected units never finished compiling and
-        // each grew past 2 GB, exhausting system memory during a normal build.
-        // This pipeline matches the last configuration observed booting on
-        // hardware.
-        out << lower_constant_vfpu_accesses(
-                lower_aot_memory_accesses(
-                    lower_constant_fpr_accesses(
-                        lower_constant_gpr_writes(emit_function_source(generated_unit, memory, generated_unit.name)))));
-        out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
-        out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
-            << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes
-            << "u, &" << generated_unit.name << ", &"
-            << generated_unit_cpp_entry_name(unit.bucket) << ");\n";
-        for (const auto label : unit.entries) {
-            out << "    runtime.register_function(" << psprecomp::hex32(label) << "u, &"
-                << generated_unit.name << ", \"" << generated_unit.name << "\");\n";
-            ++registered_entries;
+        // Stream this unit directly to disk. A single 2,800-instruction unit can
+        // generate a very large C++ function; retaining both the complete function
+        // string and a second assembled source buffer caused multi-gigabyte peaks.
+        const auto temporary_path = path.string() + ".tmp";
+        {
+            std::ofstream out(temporary_path, std::ios::binary | std::ios::trunc);
+            if (!out) throw psprecomp::Error("Cannot create generated file: " + path.string());
+            GprLoweringStreamBuf lowering_buffer(out);
+            std::ostream lowered_out(&lowering_buffer);
+            lowered_out << "#include \"psprecomp/runtime.hpp\"\n#include \"generated_units.hpp\"\n#include <bit>\n#include <cmath>\n#include <cstdint>\n#include <limits>\n\nnamespace psprecomp {\n";
+            emit_function_source(lowered_out, generated_unit, memory, generated_unit.name);
+            lowered_out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
+            lowered_out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
+                << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes
+                << "u, &" << generated_unit.name << ", &"
+                << generated_unit_cpp_entry_name(unit.bucket) << ");\n";
+            for (const auto label : unit.entries) {
+                lowered_out << "    runtime.register_function(" << psprecomp::hex32(label) << "u, &"
+                    << generated_unit.name << ", \"" << generated_unit.name << "\");\n";
+                ++registered_entries;
+            }
+            lowered_out << "}\n} // namespace psprecomp\n";
+            lowered_out.flush();
+            if (!lowered_out || !out) throw psprecomp::Error("Failed writing generated file: " + path.string());
         }
-        out << "}\n} // namespace psprecomp\n";
-        rewritten_units += write_text_if_changed(path, out.str()) ? 1u : 0u;
+        // Replace an older unit only after the complete temporary source is written.
+        std::error_code remove_error;
+        std::filesystem::remove(path, remove_error);
+        std::filesystem::rename(temporary_path, path);
+        ++rewritten_units;
     }
 
     const auto registry_path = output_dir / "generated_registry.cpp";
@@ -1577,10 +1644,14 @@ int generate_auto(const std::filesystem::path &elf_path,
     registry << "}\n} // namespace psprecomp\n";
     const bool registry_rewritten = write_text_if_changed(registry_path, registry.str());
 
-    for (const auto &entry : std::filesystem::directory_iterator(output_dir)) {
-        if (!entry.is_regular_file() || entry.path().extension() != ".cpp" ||
-            !entry.path().filename().string().starts_with("generated_")) continue;
-        if (!expected_cpp.contains(entry.path().filename())) std::filesystem::remove(entry.path());
+    // A batch intentionally leaves sources emitted by earlier batches untouched.
+    // Only a full, single-pass generation owns cleanup of stale generated sources.
+    if (batch_count == 1u) {
+        for (const auto &entry : std::filesystem::directory_iterator(output_dir)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".cpp" ||
+                !entry.path().filename().string().starts_with("generated_")) continue;
+            if (!expected_cpp.contains(entry.path().filename())) std::filesystem::remove(entry.path());
+        }
     }
 
     std::ostringstream report;
@@ -1595,7 +1666,11 @@ int generate_auto(const std::filesystem::path &elf_path,
            << "  \"rewritten_translation_units\": " << rewritten_units << ",\n"
            << "  \"registry_rewritten\": " << (registry_rewritten ? "true" : "false") << ",\n"
            << "  \"import_wrappers\": " << imports.size() << ",\n"
-           << "  \"unit_span_bytes\": " << unit_span_bytes << "\n"
+           << "  \"unit_span_bytes\": " << unit_span_bytes << ",\n"
+           << "  \"batch_index\": " << batch_index << ",\n"
+           << "  \"batch_count\": " << batch_count << ",\n"
+           << "  \"batch_begin_unit\": " << batch_begin << ",\n"
+           << "  \"batch_end_unit_exclusive\": " << batch_end << "\n"
            << "}\n";
     write_text_if_changed(output_dir / "auto_codegen_report.json", report.str());
 
@@ -1628,10 +1703,30 @@ int main(int argc, char **argv) {
             if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
             return generate_auto(argv[1], argv[3], load_base, unit_span);
         }
+        if (argc >= 6 && std::string_view(argv[2]) == "--auto-batch") {
+            if (argc > 8) {
+                std::cerr << "Usage: psp_recomp <ELF> --auto-batch <generated_dir> <batch_index> <batch_count> [load_base_hex] [unit_span_bytes]\n"
+                          << "  batch_index is 1-based (1..batch_count)\n";
+                return 2;
+            }
+            const auto batch_index_1based = static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 10));
+            const auto batch_count = static_cast<std::uint32_t>(std::stoul(argv[5], nullptr, 10));
+            if (batch_count == 0u || batch_index_1based == 0u || batch_index_1based > batch_count)
+                throw psprecomp::Error("batch_index must be between 1 and batch_count");
+            const std::uint32_t load_base = argc >= 7
+                ? static_cast<std::uint32_t>(std::stoul(argv[6], nullptr, 0))
+                : psprecomp::kDefaultPspUserLoadBase;
+            const std::uint32_t unit_span = argc >= 8
+                ? static_cast<std::uint32_t>(std::stoul(argv[7], nullptr, 0))
+                : 0x20000u;
+            if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
+            return generate_auto(argv[1], argv[3], load_base, unit_span, batch_index_1based - 1u, batch_count);
+        }
         if (argc == 4) return generate_manual(argv[1], argv[2], argv[3]);
         std::cerr << "Usage:\n"
                   << "  psp_recomp <ELF> <functions.csv> <generated_manifest.cpp>\n"
-                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";
+                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n"
+                  << "  psp_recomp <ELF> --auto-batch <generated_dir> <batch_index> <batch_count> [load_base_hex] [unit_span_bytes]\n";
         return 2;
     } catch (const std::exception &e) {
         std::cerr << "psp_recomp error: " << e.what() << "\n";

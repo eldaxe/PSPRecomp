@@ -289,7 +289,8 @@ void collect_relocated_data_code_pointers(const Elf32Image &elf,
 std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf,
                                                            const GuestMemory &memory,
                                                            std::uint32_t load_base,
-                                                           const std::vector<ExecutableRange> &ranges) {
+                                                           const std::vector<ExecutableRange> &ranges,
+                                                           bool include_materialized_pointers = true) {
     std::map<std::uint32_t, std::string> seeds;
     const std::uint32_t entry = elf.runtime_entry(load_base);
     add_seed(seeds, ranges, entry, "elf_entry");
@@ -301,7 +302,14 @@ std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf
             add_seed(seeds, ranges, direct_jump_target(pc, decoded), "direct_jal_target");
         }
     }
-    collect_materialized_code_pointers(memory, ranges, seeds);
+    // The materialized-pointer heuristic scans every block start and then
+    // every LUI with a 24-instruction lookahead. On large PRX files this can
+    // generate a very large seed map before CFG traversal even begins.
+    // Low-memory AOT keeps entry/direct-call/relocation-derived seeds and lets
+    // the shared traversal discover reachable blocks without this expensive pass.
+    if (include_materialized_pointers) {
+        collect_materialized_code_pointers(memory, ranges, seeds);
+    }
     collect_relocated_data_code_pointers(elf, memory, load_base, ranges, seeds);
     // R_MIPS_32 relocations are the authoritative source for function pointers
     // stored in read-only tables embedded in the executable segment (init arrays,
@@ -410,13 +418,76 @@ bool is_executable_address(const std::vector<ExecutableRange> &ranges, std::uint
 ProgramAnalysis analyze_program(const Elf32Image &elf,
                                 const GuestMemory &memory,
                                 std::uint32_t load_base,
-                                std::size_t max_instructions_per_function) {
+                                std::size_t max_instructions_per_function,
+                                bool retain_function_details) {
     ProgramAnalysis program{};
     program.executable_ranges = executable_ranges_for(elf, load_base);
-    program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges);
-    program.functions.reserve(program.seeds.size());
+    program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges,
+                                               retain_function_details);
+    if (retain_function_details) program.functions.reserve(program.seeds.size());
+
+    // The AOT generator only consumes the union of decoded instruction and entry
+    // addresses. Retaining every per-seed FunctionAnalysis duplicates large sets
+    // across overlapping CFGs and can consume several gigabytes on large PRX files.
+    // In low-memory mode, merge each function into the global sets and release its
+    // temporary detail sets before analyzing the next seed.
+    if (!retain_function_details) {
+        // AOT needs the union of reachable instruction/entry addresses, not a
+        // separate full CFG for every seed. Walking all seeds through one shared
+        // work queue avoids repeatedly allocating overlapping per-function sets.
+        std::deque<std::uint32_t> pending;
+        std::set<std::uint32_t> queued;
+        for (const auto &[entry, source] : program.seeds) {
+            (void)source;
+            if (queued.insert(entry).second) pending.push_back(entry);
+        }
+
+        while (!pending.empty()) {
+            const std::uint32_t block_start = pending.front();
+            pending.pop_front();
+            if (!is_executable_address(program.executable_ranges, block_start)) continue;
+            program.covered_entry_labels.insert(block_start);
+            if (program.covered_labels.contains(block_start)) continue;
+
+            std::uint32_t pc = block_start;
+            while (is_executable_address(program.executable_ranges, pc)) {
+                if (pc != block_start && program.seeds.contains(pc)) break;
+                if (program.covered_labels.contains(pc)) break;
+                program.covered_labels.insert(pc);
+                const auto decoded = decode_allegrex(memory.load32(pc));
+
+                auto enqueue = [&](std::uint32_t target) {
+                    if (is_executable_address(program.executable_ranges, target) &&
+                        queued.insert(target).second) pending.push_back(target);
+                };
+
+                if (is_conditional_branch(decoded.kind)) {
+                    enqueue(branch_target(pc, decoded));
+                    enqueue(pc + 8u);
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::J) {
+                    enqueue(direct_jump_target(pc, decoded));
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::Jal) {
+                    enqueue(direct_jump_target(pc, decoded));
+                    enqueue(pc + 8u);
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::Jalr) {
+                    enqueue(pc + 8u);
+                    break;
+                }
+                if (decoded.kind == OpcodeKind::Jr) break;
+                pc += decoded.has_delay_slot() ? 8u : 4u;
+            }
+        }
+        return program;
+    }
 
     std::unordered_map<std::uint32_t, std::size_t> label_owners;
+    label_owners.reserve(program.seeds.size() * 4u);
     for (const auto &[entry, source] : program.seeds) {
         (void)source;
         auto function = analyze_function(entry, memory, program.executable_ranges, program.seeds,
