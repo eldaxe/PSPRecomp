@@ -78,6 +78,14 @@ Review the report's entry point, segment layout, relocation statistics,
 function boundaries, unsupported instructions, and imports before attempting
 code generation. Do not assume a report alone proves runtime compatibility.
 
+**Executable identity warning:** the EBOOT previously supplied for analysis contains
+strings such as `GodSaveGE2Trial`, `GodPlayerGE2Trial`, and `MODE:GE2TRIAL CONTINUOUS`.
+That suggests a trial/demo build, but is not by itself definitive proof of the disc
+revision. Do not label generated code as compatible with retail ULJS-00560 until the
+executable identity is confirmed. The local static report recorded SHA-256
+`8b48d9fb6470c221f94b0d852aa45061d043e92f497abbf2e243e4471f4c6efd`; keep the
+binary and full reports out of the repository.
+
 ## Architecture contract
 
 - `arm64-v8a` is the initial and only Android ABI.
