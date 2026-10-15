@@ -410,24 +410,33 @@ bool is_executable_address(const std::vector<ExecutableRange> &ranges, std::uint
 ProgramAnalysis analyze_program(const Elf32Image &elf,
                                 const GuestMemory &memory,
                                 std::uint32_t load_base,
-                                std::size_t max_instructions_per_function) {
+                                std::size_t max_instructions_per_function,
+                                bool retain_function_details) {
     ProgramAnalysis program{};
     program.executable_ranges = executable_ranges_for(elf, load_base);
     program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges);
-    program.functions.reserve(program.seeds.size());
+    if (retain_function_details) program.functions.reserve(program.seeds.size());
 
+    // The AOT generator only consumes the union of decoded instruction and entry
+    // addresses. Retaining every per-seed FunctionAnalysis duplicates large sets
+    // across overlapping CFGs and can consume several gigabytes on large PRX files.
+    // In low-memory mode, merge each function into the global sets and release its
+    // temporary detail sets before analyzing the next seed.
     std::unordered_map<std::uint32_t, std::size_t> label_owners;
+    if (retain_function_details) label_owners.reserve(program.seeds.size() * 4u);
     for (const auto &[entry, source] : program.seeds) {
         (void)source;
         auto function = analyze_function(entry, memory, program.executable_ranges, program.seeds,
                                          max_instructions_per_function);
         for (const auto label : function.labels) program.covered_labels.insert(label);
         for (const auto label : function.entry_labels) {
-            const auto [it, inserted] = label_owners.emplace(label, program.functions.size());
-            if (!inserted && it->second != program.functions.size()) ++program.overlapping_label_count;
+            if (retain_function_details) {
+                const auto [it, inserted] = label_owners.emplace(label, program.functions.size());
+                if (!inserted && it->second != program.functions.size()) ++program.overlapping_label_count;
+            }
             program.covered_entry_labels.insert(label);
         }
-        program.functions.push_back(std::move(function));
+        if (retain_function_details) program.functions.push_back(std::move(function));
     }
     return program;
 }
