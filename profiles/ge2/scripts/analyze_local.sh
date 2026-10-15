@@ -4,7 +4,7 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
 BUILD_DIR="${GE2_HOST_BUILD_DIR:-$ROOT_DIR/out/ge2-host-tools}"
 ANALYSIS_DIR="${GE2_ANALYSIS_DIR:-$ROOT_DIR/profiles/ge2/analysis}"
-LOAD_BASE="${GE2_LOAD_BASE:-0x08800000}"
+LOAD_BASE="${GE2_LOAD_BASE:-0x08804000}"
 CODEGEN=0
 
 usage() {
