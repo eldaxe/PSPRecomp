@@ -1542,10 +1542,16 @@ int generate_auto(const std::filesystem::path &elf_path,
         // each grew past 2 GB, exhausting system memory during a normal build.
         // This pipeline matches the last configuration observed booting on
         // hardware.
-        out << lower_constant_vfpu_accesses(
-                lower_aot_memory_accesses(
-                    lower_constant_fpr_accesses(
-                        lower_constant_gpr_writes(emit_function_source(generated_unit, memory, generated_unit.name)))));
+        // Keep automatic generation memory-bounded. The text-lowering passes above
+        // each materialize another full copy of a translation unit (and several use
+        // regex_replace); on large PSP PRXs their transient allocations can dwarf the
+        // emitted source and trigger the OS OOM killer before the first unit is saved.
+        // These passes are optional codegen optimizations: emit_function_source already
+        // produces valid code using the generic context/memory helpers, so preserve
+        // semantics and leave the optional lowerings out of the automatic path.
+        std::cerr << "Emitting unit " << unit.bucket << " (" << unit.instructions.size()
+                  << " instructions, " << unit.entries.size() << " entries)\n";
+        out << emit_function_source(generated_unit, memory, generated_unit.name);
         out << "void register_generated_unit_" << unit.bucket << "(Runtime &runtime) {\n";
         out << "    runtime.register_generated_unit(" << unit.bucket << "u, "
             << psprecomp::hex32(generated_unit.address) << "u, " << unit_span_bytes
