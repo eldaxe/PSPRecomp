@@ -58,7 +58,7 @@ public final class MainActivity extends Activity {
         column.addView(description);
 
         Button pickIso = new Button(this);
-        pickIso.setText("Pilih ISO / CSO (ISO 9660)");
+        pickIso.setText("Pilih ISO (ISO 9660; CSO belum didukung)");
         pickIso.setOnClickListener(v -> pickFile(PICK_ISO, "application/octet-stream"));
         column.addView(pickIso, matchWrap());
 
