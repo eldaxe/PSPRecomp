@@ -289,11 +289,30 @@ void collect_relocated_data_code_pointers(const Elf32Image &elf,
 std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf,
                                                            const GuestMemory &memory,
                                                            std::uint32_t load_base,
-                                                           const std::vector<ExecutableRange> &ranges) {
+                                                           const std::vector<ExecutableRange> &ranges,
+                                                           bool reachable_only) {
     std::map<std::uint32_t, std::string> seeds;
     const std::uint32_t entry = elf.runtime_entry(load_base);
     add_seed(seeds, ranges, entry, "elf_entry");
 
+    if (reachable_only) {
+        // In a PRX, PT_LOAD PF_X describes memory protection, not a guarantee
+        // that every word in the segment is code. Some modules place constants,
+        // strings, jump tables and metadata in the same RX segment as .text.
+        // Do not sweep that entire segment for JAL opcodes or LUI sequences:
+        // those patterns also occur in data and create thousands of false CFG
+        // roots. Relocated R_MIPS_32 values are retained as explicit roots
+        // because the relocation is evidence that the word is a pointer.
+        for (const auto &site : elf.relocation_sites(load_base)) {
+            if (site.type != 2u || !memory.contains(site.patch_address, 4u)) continue;
+            add_seed(seeds, ranges, memory.load32(site.patch_address),
+                     "relocated_r_mips32_code_pointer");
+        }
+        return seeds;
+    }
+
+    // Legacy broad discovery mode. Kept unchanged for projects that rely on
+    // whole-segment heuristics; use reachable_only for mixed RX code/data PRXs.
     for (const auto &range : ranges) {
         for (std::uint32_t pc = range.start; pc + 4u <= range.end; pc += 4u) {
             const auto decoded = decode_allegrex(memory.load32(pc));
@@ -303,12 +322,10 @@ std::map<std::uint32_t, std::string> collect_initial_seeds(const Elf32Image &elf
     }
     collect_materialized_code_pointers(memory, ranges, seeds);
     collect_relocated_data_code_pointers(elf, memory, load_base, ranges, seeds);
-    // R_MIPS_32 relocations are the authoritative source for function pointers
-    // stored in read-only tables embedded in the executable segment (init arrays,
-    // vtables, callbacks). Scanning raw RX words would confuse J opcodes with pointers.
     for (const auto &site : elf.relocation_sites(load_base)) {
         if (site.type != 2u || !memory.contains(site.patch_address, 4u)) continue;
-        add_seed(seeds, ranges, memory.load32(site.patch_address), "relocated_r_mips32_code_pointer");
+        add_seed(seeds, ranges, memory.load32(site.patch_address),
+                 "relocated_r_mips32_code_pointer");
     }
     return seeds;
 }
@@ -410,17 +427,51 @@ bool is_executable_address(const std::vector<ExecutableRange> &ranges, std::uint
 ProgramAnalysis analyze_program(const Elf32Image &elf,
                                 const GuestMemory &memory,
                                 std::uint32_t load_base,
-                                std::size_t max_instructions_per_function) {
+                                std::size_t max_instructions_per_function,
+                                bool reachable_only) {
     ProgramAnalysis program{};
     program.executable_ranges = executable_ranges_for(elf, load_base);
-    program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges);
+    program.seeds = collect_initial_seeds(elf, memory, load_base, program.executable_ranges,
+                                          reachable_only);
     program.functions.reserve(program.seeds.size());
 
+    std::vector<FunctionAnalysis> analyzed;
+    if (reachable_only) {
+        // Discover direct callees only while traversing blocks reachable from a
+        // trusted root (the PRX entry or a relocation-backed code pointer).
+        // This prevents instruction-looking words in RX data from becoming
+        // independent functions merely because a linear sweep decoded them.
+        std::set<std::uint32_t> pending;
+        std::set<std::uint32_t> processed;
+        for (const auto &[entry, source] : program.seeds) {
+            (void)source;
+            pending.insert(entry);
+        }
+        while (!pending.empty()) {
+            const std::uint32_t entry = *pending.begin();
+            pending.erase(pending.begin());
+            if (!processed.insert(entry).second) continue;
+
+            auto function = analyze_function(entry, memory, program.executable_ranges,
+                                              program.seeds, max_instructions_per_function);
+            for (const auto target : function.direct_calls) {
+                if (!is_executable_address(program.executable_ranges, target)) continue;
+                if (program.seeds.try_emplace(target, "reachable_direct_call").second) {
+                    pending.insert(target);
+                }
+            }
+            analyzed.push_back(std::move(function));
+        }
+    } else {
+        for (const auto &[entry, source] : program.seeds) {
+            (void)source;
+            analyzed.push_back(analyze_function(entry, memory, program.executable_ranges,
+                                                program.seeds, max_instructions_per_function));
+        }
+    }
+
     std::unordered_map<std::uint32_t, std::size_t> label_owners;
-    for (const auto &[entry, source] : program.seeds) {
-        (void)source;
-        auto function = analyze_function(entry, memory, program.executable_ranges, program.seeds,
-                                         max_instructions_per_function);
+    for (auto &function : analyzed) {
         for (const auto label : function.labels) program.covered_labels.insert(label);
         for (const auto label : function.entry_labels) {
             const auto [it, inserted] = label_owners.emplace(label, program.functions.size());
