@@ -1616,7 +1616,7 @@ int generate_auto(const std::filesystem::path &elf_path,
 int main(int argc, char **argv) {
     try {
         if (argc >= 4 && std::string_view(argv[2]) == "--auto") {
-            if (argc > 7) {
+            if (argc > 7 || (argc == 7 && std::string_view(argv[6]) != "--reachable")) {
                 std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes] [--reachable]\n";
                 return 2;
             }
