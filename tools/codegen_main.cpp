@@ -1435,7 +1435,8 @@ bool write_text_if_changed(const std::filesystem::path &path, const std::string 
 int generate_auto(const std::filesystem::path &elf_path,
                   const std::filesystem::path &output_dir,
                   std::uint32_t load_base,
-                  std::uint32_t unit_span_bytes) {
+                  std::uint32_t unit_span_bytes,
+                  bool reachable_only) {
     const auto elf = psprecomp::Elf32Image::from_file(elf_path);
     psprecomp::GuestMemory memory;
     (void)elf.load_and_relocate(memory, load_base);
@@ -1443,7 +1444,7 @@ int generate_auto(const std::filesystem::path &elf_path,
     if (const auto module = elf.find_module_info(memory, load_base)) imports = elf.scan_imports(memory, *module);
     std::set<std::uint32_t> import_stubs;
     for (const auto &import : imports) import_stubs.insert(import.stub_address);
-    const auto program = psprecomp::analyze_program(elf, memory, load_base);
+    const auto program = psprecomp::analyze_program(elf, memory, load_base, 131072u, reachable_only);
     if (program.executable_ranges.empty()) throw psprecomp::Error("ELF has no executable ranges");
 
     std::filesystem::create_directories(output_dir);
@@ -1585,7 +1586,7 @@ int generate_auto(const std::filesystem::path &elf_path,
 
     std::ostringstream report;
     report << "{\n"
-           << "  \"mode\": \"automatic_global_cfg\",\n"
+           << "  \"mode\": \"" << (reachable_only ? "reachable_global_cfg" : "automatic_global_cfg") << "\",\n"
            << "  \"emission\": \"single_copy_basic_blocks\",\n"
            << "  \"partitioning\": \"fixed_executable_address_span\",\n"
            << "  \"discovered_function_seeds\": " << program.seeds.size() << ",\n"
@@ -1615,23 +1616,24 @@ int generate_auto(const std::filesystem::path &elf_path,
 int main(int argc, char **argv) {
     try {
         if (argc >= 4 && std::string_view(argv[2]) == "--auto") {
-            if (argc > 6) {
-                std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";
+            if (argc > 7 || (argc == 7 && std::string_view(argv[6]) != "--reachable")) {
+                std::cerr << "Usage: psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes] [--reachable]\n";
                 return 2;
             }
             const std::uint32_t load_base = argc >= 5
                 ? static_cast<std::uint32_t>(std::stoul(argv[4], nullptr, 0))
                 : psprecomp::kDefaultPspUserLoadBase;
-            const std::uint32_t unit_span = argc >= 6
+            const std::uint32_t unit_span = argc >= 6 && std::string_view(argv[5]) != "--reachable"
                 ? static_cast<std::uint32_t>(std::stoul(argv[5], nullptr, 0))
                 : 0x20000u;
+            const bool reachable_only = (argc >= 6 && std::string_view(argv[argc - 1]) == "--reachable");
             if (unit_span == 0u || (unit_span & 3u) != 0u) throw psprecomp::Error("unit_span_bytes must be non-zero and 4-byte aligned");
-            return generate_auto(argv[1], argv[3], load_base, unit_span);
+            return generate_auto(argv[1], argv[3], load_base, unit_span, reachable_only);
         }
         if (argc == 4) return generate_manual(argv[1], argv[2], argv[3]);
         std::cerr << "Usage:\n"
                   << "  psp_recomp <ELF> <functions.csv> <generated_manifest.cpp>\n"
-                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes]\n";
+                  << "  psp_recomp <ELF> --auto <generated_dir> [load_base_hex] [unit_span_bytes] [--reachable]\n";
         return 2;
     } catch (const std::exception &e) {
         std::cerr << "psp_recomp error: " << e.what() << "\n";
